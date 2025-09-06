@@ -2073,3 +2073,108 @@ permissions.set("user", TaskPermissions.READ | TaskPermissions.EXEC)
 # result = vm.ffi_call("add", 2, 3)
 
 # You can extend the parser to support FFI_Call nodes and permission declarations in Stacker code.
+
+import subprocess
+import platform
+from pathlib import Path
+
+class VM:
+    def __init__(self, workdir="vm_build"):
+        self.workdir = Path(workdir)
+        self.workdir.mkdir(exist_ok=True)
+        self.system = platform.system().lower()
+
+    def run_cmd(self, cmd):
+        print(f"[VM] Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[ERROR]\n{result.stderr}")
+        else:
+            print(result.stdout)
+        return result
+
+    # ---------- Compilers ----------
+    def compile_nasm(self, src, out="out"):
+        obj = self.workdir / f"{out}.o"
+        exe = self.workdir / out
+        self.run_cmd(["nasm", "-felf64", src, "-o", str(obj)])
+        self.run_cmd(["ld", str(obj), "-o", str(exe)])
+        return exe
+
+    def compile_gas(self, src, out="out"):
+        obj = self.workdir / f"{out}.o"
+        exe = self.workdir / out
+        self.run_cmd(["as", src, "-o", str(obj)])
+        self.run_cmd(["ld", str(obj), "-o", str(exe)])
+        return exe
+
+    def compile_masm(self, src, out="out.exe"):
+        exe = self.workdir / out
+        obj = self.workdir / "out.obj"
+
+        if "windows" in self.system:
+            # Native MASM on Windows
+            self.run_cmd(["ml64", "/Fo" + str(obj), "/c", src])
+            self.run_cmd(["link", "/SUBSYSTEM:CONSOLE", str(obj), "/OUT:" + str(exe)])
+        else:
+            # Cross-compile MASM with Wine
+            self.run_cmd(["wine", "ml64.exe", "/Fo" + str(obj), "/c", src])
+            self.run_cmd(["wine", "link.exe", "/SUBSYSTEM:CONSOLE", str(obj), "/OUT:" + str(exe)])
+        return exe
+
+    def run_wasm(self, src):
+        # Try wasmer first, fallback to wasmtime
+        try:
+            return self.run_cmd(["wasmer", src])
+        except FileNotFoundError:
+            return self.run_cmd(["wasmtime", src])
+
+    # ---------- Execution ----------
+    def execute(self, exe):
+        exe = Path(exe)
+        if "windows" in self.system:
+            return self.run_cmd([str(exe)])
+        else:
+            if exe.suffix == ".exe":  # Windows exe on Linux/macOS
+                return self.run_cmd(["wine", str(exe)])
+            else:
+                return self.run_cmd([str(exe)])
+
+    # ---------- Dispatcher ----------
+    def run(self, src):
+        src = Path(src)
+        ext = src.suffix.lower()
+        base = src.stem
+
+        if ext == ".nasm":
+            exe = self.compile_nasm(str(src), base)
+            return self.execute(exe)
+
+        elif ext == ".asm":
+            # Try GAS, fallback to NASM
+            try:
+                exe = self.compile_gas(str(src), base)
+            except Exception:
+                exe = self.compile_nasm(str(src), base)
+            return self.execute(exe)
+
+        elif ext == ".masm":
+            exe = self.compile_masm(str(src), base + ".exe")
+            return self.execute(exe)
+
+        elif ext == ".wasm":
+            return self.run_wasm(str(src))
+
+        else:
+            raise ValueError(f"Unsupported extension: {ext}")
+
+
+if __name__ == "__main__":
+    vm = VM()
+
+    # Examples (auto-detected by extension)
+    vm.run("hello.nasm")
+    vm.run("hello.asm")
+    vm.run("hello.masm")
+    vm.run("hello.wasm")
+
