@@ -1001,3 +1001,818 @@ if __name__ == "__main__":
         sys.exit(0)
 
     compile_and_run_file(sys.argv[1])
+
+# -----------------------------
+# Stacker LLVM AOT Compiler
+# -----------------------------
+from llvmlite import ir, binding
+import sys
+
+# === LLVM Initialization ===
+binding.initialize()
+binding.initialize_native_target()
+binding.initialize_native_asmprinter()
+
+# === Target machine for AOT ===
+target = binding.Target.from_default_triple()
+target_machine = target.create_target_machine()
+llvm_module = ir.Module(name="stacker")
+llvm_module.triple = binding.get_default_triple()
+
+# === Safety Layer: Gated Isolation ===
+# Each task gets its own LLVM function capsule.
+task_funcs = {}
+
+# === IR Builder Utilities ===
+int_type = ir.IntType(64)
+bool_type = ir.IntType(1)
+str_type = ir.PointerType(ir.IntType(8))  # naive string
+
+def compile_expr(expr, builder, env):
+    if isinstance(expr, Push):  # literal
+        if isinstance(expr.value, int):
+            return ir.Constant(int_type, expr.value)
+        elif isinstance(expr.value, str):
+            return builder.global_string_ptr(expr.value)
+    if isinstance(expr, Var):
+        return env[expr.name]
+    raise RuntimeError(f"Unsupported expr {expr}")
+
+def compile_stmt(stmt, builder, env):
+    if isinstance(stmt, VarDecl):
+        val = compile_expr(stmt.expr, builder, env)
+        env[stmt.name] = val
+        return None
+    elif isinstance(stmt, Say):
+        val = compile_expr(stmt.expr, builder, env)
+        # Declare printf if not declared
+        printf_ty = ir.FunctionType(ir.IntType(32), [str_type], var_arg=True)
+        printf = llvm_module.globals.get("printf")
+        if printf is None:
+            printf = ir.Function(llvm_module, printf_ty, name="printf")
+        fmt = builder.global_string_ptr("%ld\n")
+        builder.call(printf, [fmt, val])
+        return None
+    elif isinstance(stmt, Match):
+        # For AOT: lower match to nested if-else
+        value = compile_expr(stmt.expr, builder, env)
+        for case in stmt.cases:
+            # simple literal matches only in this sketch
+            if isinstance(case.pattern, LiteralPattern):
+                cond = builder.icmp_signed("==", value, ir.Constant(int_type, case.pattern.value))
+                with builder.if_then(cond):
+                    for s in case.block:
+                        compile_stmt(s, builder, env)
+                    break
+        return None
+    else:
+        raise RuntimeError(f"Unsupported stmt {stmt}")
+
+
+def compile_task(task):
+    # Create isolated LLVM function capsule
+    func_ty = ir.FunctionType(int_type, [])
+    func = ir.Function(llvm_module, func_ty, name=task.name)
+    block = func.append_basic_block(name="entry")
+    builder = ir.IRBuilder(block)
+    env = {}
+    for stmt in task.body:
+        compile_stmt(stmt, builder, env)
+    builder.ret(ir.Constant(int_type, 0))
+    task_funcs[task.name] = func
+
+
+# === Compile Program ===
+def compile_program(ast):
+    for node in ast:
+        if isinstance(node, Task):
+            compile_task(node)
+
+    # Verify module
+    llvm_ir = str(llvm_module)
+    mod = binding.parse_assembly(llvm_ir)
+    mod.verify()
+
+    # Emit native object
+    obj = target_machine.emit_object(mod)
+    with open("stacker.out.o", "wb") as f:
+        f.write(obj)
+    print("✅ Compiled to stacker.out.o")
+
+    # Emit executable binary (linker step needed, simplified here)
+    return llvm_ir
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python stacker.py program.stk")
+        sys.exit(0)
+    with open(sys.argv[1], "r") as f:
+        src = f.read()
+    tokens = tokenize(src)
+    ast = parse(tokens)
+    llvm_ir = compile_program(ast)
+    print(llvm_ir)  # For inspection
+
+TOKEN_REGEX = [
+    ("NUMBER", r"\d+"),
+    ("STRING", r"\".*?\""),
+    ("IDENT",  r"[A-Za-z_][A-Za-z0-9_]*"),
+    ("OP",     r"[+\-*/<>]=?|==|\||&|\*"),
+    ("SYMBOL", r"[:=]|\.\.|,|\(|\)|\[|\]|\{|\}"),
+    ("NEWLINE",r"\n"),
+    ("SKIP",   r"[ \t]+"),
+]
+
+def tokenize(src):
+    import re
+    tokens, pos = [], 0
+    while pos < len(src):
+        for ttype, pattern in TOKEN_REGEX:
+            m = re.match(pattern, src[pos:])
+            if m:
+                if ttype not in ("SKIP", "NEWLINE"):
+                    tokens.append((ttype, m.group(0)))
+                pos += len(m.group(0))
+                break
+        else:
+            raise SyntaxError(f"Unexpected char {src[pos]!r} at {pos}")
+    return tokens
+
+# -----------------------------
+# Beanstalk Hooks (for beanstalking variables)
+beanstalk_hooks = {}
+def register_beanstalk_hook(varname, hook):
+    """
+    Register a hook function to be called when a beanstalking variable is updated.
+    """
+    if varname not in beanstalk_hooks:
+        beanstalk_hooks[varname] = []
+    beanstalk_hooks[varname].append(hook)
+    def run_beanstalk_hooks(varname, value):
+
+        if varname in beanstalk_hooks:
+            for hook in beanstalk_hooks[varname]:
+                hook(value)
+                return run_beanstalk_hooks
+            return run_beanstalk_hooks
+        def run_beanstalk_hooks(varname, value):
+            if varname in beanstalk_hooks:
+                for hook in beanstalk_hooks[varname]:
+                    hook(value)
+
+TOKEN_REGEX = [
+    ("NUMBER", r"\d+"),
+    ("STRING", r"\".*?\""),
+    ("IDENT",  r"[A-Za-z_][A-Za-z0-9_]*"),
+    ("OP",     r"[+\-*/<>]=?|==|\||&|\*"),
+    ("SYMBOL", r"[:=]|\.\.|,|\(|\)|\[|\]|\{|\}"),
+    ("NEWLINE",r"\n"),
+    ("SKIP",   r"[ \t]+"),
+]
+
+def tokenize(src):
+    import re
+    tokens, pos = [], 0
+    while pos < len(src):
+        for ttype, pattern in TOKEN_REGEX:
+            m = re.match(pattern, src[pos:])
+            if m:
+                if ttype not in ("SKIP", "NEWLINE"):
+                    tokens.append((ttype, m.group(0)))
+                pos += len(m.group(0))
+                break
+        else:
+            raise SyntaxError(f"Unexpected char {src[pos]!r} at {pos}")
+    return tokens
+
+# -----------------------------
+# Beanstalk Hooks (for beanstalking variables)
+beanstalk_hooks = {}
+def register_beanstalk_hook(varname, hook):
+    """
+    Register a hook function to be called when a beanstalking variable is updated.
+    """
+    if varname not in beanstalk_hooks:
+        beanstalk_hooks[varname] = []
+    beanstalk_hooks[varname].append(hook)
+    def run_beanstalk_hooks(varname, value):
+        if varname in beanstalk_hooks:
+            for hook in beanstalk_hooks[varname]:
+                hook(value)
+                return run_beanstalk_hooks
+            return run_beanstalk_hooks
+        def run_beanstalk_hooks(varname, value):
+            if varname in beanstalk_hooks:
+                for hook in beanstalk_hooks[varname]:
+                    hook(value)
+                    # -----------------------------
+                    return run_beanstalk_hooks
+                # Utility: Print tree structure
+                def print_tree(value, indent=0):
+                    if isinstance(value, list):
+
+                        for v in value:
+                            print(" " * indent + "-")
+                            print_tree(v, indent + 2)
+                            
+class Task:  # capsule
+    def __init__(self, name, body): self.name, self.body = name, body
+
+class VarDecl:
+    def __init__(self, name, expr): self.name, self.expr = name, expr
+
+class Say:
+    def __init__(self, expr): self.expr = expr
+
+class Match:
+    def __init__(self, expr, cases): self.expr, self.cases = expr, cases
+
+class Push:  # literal
+    def __init__(self, value): self.value = value
+
+class Var:   # variable reference
+    def __init__(self, name): self.name = name
+
+    class Chart:
+        def __init__(self, expr, tree=False): self.expr, self.tree = expr, tree
+        # -----------------------------
+        # Pattern AST (Parse-time)
+        class Pattern:
+            """Base class for all pattern types."""
+            def match(self, value, env):
+                raise NotImplementedError("Pattern subclasses must implement match()")
+            class LiteralPattern(Pattern):
+                """Literal pattern: 42, "hello"."""
+                def __init__(self, value):
+                    self.value = value
+                    def match(self, value, env):
+                        return value == self.value
+                    class WildcardPattern(Pattern):
+                        """Wildcard pattern: _."""
+                        def match(self, value, env):
+                            return True
+                        class VarPattern(Pattern):
+                            """Variable pattern: name."""
+                            def __init__(self, name):
+                                self.name = name
+                            def match(self, value, env):
+                                env[self.name] = value
+                                return True
+                            class TuplePattern(Pattern):
+                                """Tuple pattern: (pat, pat, name="default")."""
+                                def __init__(self, elts):
+                                    self.elts = elts
+                                    def match(self, value, env):
+                                        if not isinstance(value, tuple):
+                                            return False
+                                        vals = list(value)
+                                        vi = 0
+                                        for sub, default, lazy in self.elts:
+                                            if vi < len(vals):
+                                                if not sub.match(vals[vi], env):
+                                                    return False
+                                                vi += 1
+
+class Task:  # capsule
+    def __init__(self, name, body): self.name, self.body = name, body
+
+class VarDecl:
+    def __init__(self, name, expr): self.name, self.expr = name, expr
+
+class Say:
+    def __init__(self, expr): self.expr = expr
+
+class Match:
+    def __init__(self, expr, cases): self.expr, self.cases = expr, cases
+
+class Push:  # literal
+    def __init__(self, value): self.value = value
+
+class Var:   # variable reference
+    def __init__(self, name): self.name = name
+
+class Chart:
+    def __init__(self, expr, tree=False): self.expr, self.tree = expr, tree
+    class Case:
+        def __init__(self, pattern, block):
+            self.pattern = pattern
+            self.block = block
+
+from llvmlite import ir, binding
+
+binding.initialize()
+binding.initialize_native_target()
+binding.initialize_native_asmprinter()
+
+target = binding.Target.from_default_triple()
+target_machine = target.create_target_machine()
+llvm_module = ir.Module(name="stacker")
+llvm_module.triple = binding.get_default_triple()
+
+int_type = ir.IntType(64)
+str_type = ir.PointerType(ir.IntType(8))
+
+def compile_expr(expr, builder, env):
+    if isinstance(expr, Push):
+        if isinstance(expr.value, int):
+            return ir.Constant(int_type, expr.value)
+        elif isinstance(expr.value, str):
+            return builder.global_string_ptr(expr.value)
+    if isinstance(expr, Var):
+        return env[expr.name]
+    raise RuntimeError(f"Unsupported expr {expr}")
+
+def compile_stmt(stmt, builder, env):
+    if isinstance(stmt, VarDecl):
+        val = compile_expr(stmt.expr, builder, env)
+        env[stmt.name] = val
+    elif isinstance(stmt, Say):
+        val = compile_expr(stmt.expr, builder, env)
+        printf_ty = ir.FunctionType(ir.IntType(32), [str_type], var_arg=True)
+        printf = llvm_module.globals.get("printf")
+        if printf is None:
+            printf = ir.Function(llvm_module, printf_ty, name="printf")
+        fmt = builder.global_string_ptr("%ld\n")
+        builder.call(printf, [fmt, val])
+    elif isinstance(stmt, Match):
+        value = compile_expr(stmt.expr, builder, env)
+        for case in stmt.cases:
+            if isinstance(case.pattern, LiteralPattern):
+                cond = builder.icmp_signed("==", value, ir.Constant(int_type, case.pattern.value))
+                with builder.if_then(cond):
+                    for s in case.block:
+                        compile_stmt(s, builder, env)
+
+def compile_task(task):
+    func_ty = ir.FunctionType(int_type, [])
+    func = ir.Function(llvm_module, func_ty, name=task.name)
+    block = func.append_basic_block("entry")
+    builder = ir.IRBuilder(block)
+    env = {}
+    for stmt in task.body:
+        compile_stmt(stmt, builder, env)
+    builder.ret(ir.Constant(int_type, 0))
+
+    task_funcs[task.name] = func
+    def compile_program(ast):
+        for node in ast:
+            if isinstance(node, Task):
+             compile_task(node)
+            llvm_ir = str(llvm_module)
+            mod = binding.parse_assembly(llvm_ir)
+            mod.verify()
+            obj = target_machine.emit_object(mod)
+            with open("stacker.out.o", "wb") as f:
+                f.write(obj)
+                print("✅ Compiled to stacker.out.o")
+                return llvm_ir
+            if __name__ == "__main__":
+                if len(sys.argv) < 2:
+                    print("Usage: python stacker.py program.stk")
+                    sys.exit(0)
+                with open(sys.argv[1], "r") as f:
+                    src = f.read()
+                tokens = tokenize(src)
+                ast = parse(tokens)
+                llvm_ir = compile_program(ast)
+                print(llvm_ir)
+                print(llvm_ir)
+                
+def compile_program(ast):
+    for node in ast:
+        if isinstance(node, Task):
+            compile_task(node)
+
+    llvm_ir = str(llvm_module)
+    mod = binding.parse_assembly(llvm_ir)
+    mod.verify()
+
+    obj = target_machine.emit_object(mod)
+    with open("stacker.out.o", "wb") as f:
+        f.write(obj)
+    print("✅ Compiled object: stacker.out.o")
+
+    return llvm_ir
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python stacker.py program.stk")
+        sys.exit(0)
+    with open(sys.argv[1], "r") as f:
+        src = f.read()
+    tokens = tokenize(src)
+    ast = parse(tokens)
+    llvm_ir = compile_program(ast)
+    print(llvm_ir)  # For inspection
+
+def compile_program(ast):
+    for node in ast:
+        if isinstance(node, Task):
+            compile_task(node)
+
+    llvm_ir = str(llvm_module)
+    mod = binding.parse_assembly(llvm_ir)
+    mod.verify()
+
+    obj = target_machine.emit_object(mod)
+    with open("stacker.out.o", "wb") as f:
+        f.write(obj)
+    print("✅ Compiled object: stacker.out.o")
+
+    return llvm_ir
+
+def compile_program(ast):
+    for node in ast:
+        if isinstance(node, Task):
+            compile_task(node)
+    llvm_ir = str(llvm_module)
+    mod = binding.parse_assembly(llvm_ir)
+    mod.verify()
+    obj = target_machine.emit_object(mod)
+    with open("stacker.out.o", "wb") as f:
+        f.write(obj)
+    print("✅ Compiled object: stacker.out.o")
+    return llvm_ir
+
+from llvmlite import ir, binding
+
+# -----------------------------
+# LLVM Setup
+# -----------------------------
+binding.initialize()
+binding.initialize_native_target()
+binding.initialize_native_asmprinter()
+
+target = binding.Target.from_default_triple()
+target_machine = target.create_target_machine()
+llvm_module = ir.Module(name="stacker")
+llvm_module.triple = binding.get_default_triple()
+
+# Types
+int_type = ir.IntType(64)
+bool_type = ir.IntType(1)
+str_type = ir.PointerType(ir.IntType(8))
+
+# printf decl (global)
+printf_ty = ir.FunctionType(ir.IntType(32), [str_type], var_arg=True)
+printf = ir.Function(llvm_module, printf_ty, name="printf")
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def compile_expr(expr, builder, env):
+    if isinstance(expr, Push):
+        if isinstance(expr.value, int):
+            return ir.Constant(int_type, expr.value)
+        elif isinstance(expr.value, str):
+            return builder.global_string_ptr(expr.value)
+    elif isinstance(expr, Var):
+        return env[expr.name]
+    else:
+        raise RuntimeError(f"Unsupported expr {expr}")
+
+def emit_print(val, builder):
+    if isinstance(val.type, ir.IntType):
+        fmt = builder.global_string_ptr("%ld\n")
+        builder.call(printf, [fmt, val])
+    else:
+        fmt = builder.global_string_ptr("%s\n")
+        builder.call(printf, [fmt, val])
+
+# -----------------------------
+# Pattern Compilation
+# -----------------------------
+def compile_pattern(pattern, value, builder, env):
+    """
+    Compile a pattern against `value`.
+    Returns (matched_bool, updated_env).
+    """
+
+    # === Literal Pattern ===
+    if isinstance(pattern, LiteralPattern):
+        cond = builder.icmp_signed("==", value, ir.Constant(int_type, pattern.value))
+        return cond, env
+
+    # === Wildcard Pattern ===
+    elif isinstance(pattern, WildcardPattern):
+        return ir.Constant(bool_type, True), env
+
+    # === Variable Pattern ===
+    elif isinstance(pattern, VarPattern):
+        env[pattern.name] = value
+        return ir.Constant(bool_type, True), env
+
+    # === Tuple Pattern ===
+    elif isinstance(pattern, TuplePattern):
+        # Expect value as a pointer to struct {i64,...}
+        matched = ir.Constant(bool_type, True)
+        for i, (sub, default, lazy) in enumerate(pattern.elts):
+            field_ptr = builder.gep(value, [ir.Constant(int_type, 0), ir.Constant(int_type, i)])
+            field_val = builder.load(field_ptr)
+            cond, env = compile_pattern(sub, field_val, builder, env)
+            matched = builder.and_(matched, cond)
+        return matched, env
+
+    # === List Pattern ===
+    elif isinstance(pattern, ListPattern):
+        # For LLVM AOT, we lower lists as arrays of i64 with length
+        length_ptr = builder.gep(value, [ir.Constant(int_type, 0), ir.Constant(int_type, 0)])
+        array_ptr  = builder.gep(value, [ir.Constant(int_type, 0), ir.Constant(int_type, 1)])
+        length_val = builder.load(length_ptr)
+
+        matched = ir.Constant(bool_type, True)
+        vi = ir.Constant(int_type, 0)
+
+        for i, (sub, default, lazy) in enumerate(pattern.elts):
+            if isinstance(sub, SplatPattern):
+                # capture rest of list into env
+                env[sub.var] = array_ptr
+                continue
+            # load element i
+            idx_ptr = builder.gep(array_ptr, [ir.Constant(int_type, i)])
+            elem_val = builder.load(idx_ptr)
+            cond, env = compile_pattern(sub, elem_val, builder, env)
+            matched = builder.and_(matched, cond)
+
+        return matched, env
+
+    # === Dict Pattern ===
+    elif isinstance(pattern, DictPattern):
+        # Lower dict as runtime helper calls (pseudocode)
+        matched = ir.Constant(bool_type, True)
+        for key, sub, default, lazy in pattern.entries:
+            # runtime helper: dict_lookup(dict, key) -> value*
+            dict_lookup_ty = ir.FunctionType(str_type, [str_type, str_type])
+            dict_lookup_fn = llvm_module.globals.get("dict_lookup")
+            if dict_lookup_fn is None:
+                dict_lookup_fn = ir.Function(llvm_module, dict_lookup_ty, name="dict_lookup")
+            key_val = builder.global_string_ptr(key)
+            field_val = builder.call(dict_lookup_fn, [value, key_val])
+            cond, env = compile_pattern(sub, field_val, builder, env)
+            matched = builder.and_(matched, cond)
+        return matched, env
+
+    # === Splat Pattern ===
+    elif isinstance(pattern, SplatPattern):
+        env[pattern.var] = value
+        return ir.Constant(bool_type, True), env
+
+    else:
+        raise RuntimeError(f"Unsupported pattern {pattern}")
+
+    # -----------------------------
+    # Parser (Token Stream -> AST)
+    def parse(tokens):
+        pos = 0
+        def match(ttype, value=None):
+            nonlocal pos
+            if pos < len(tokens) and tokens[pos][0] == ttype and (value is None or tokens[pos][1] == value):
+                pos += 1
+                return tokens[pos - 1]
+            return None
+        def expect(ttype, value=None):
+            tok = match(ttype, value)
+            if not tok:
+                raise SyntaxError(f"Expected {ttype} {value} at {pos}")
+            return tok
+        def parse_expr():
+            if match("NUMBER"):
+                return Push(int(tokens[pos - 1][1]))
+            if match("STRING"):
+                return Push(tokens[pos - 1][1][1:-1])
+            if match("IDENT"):
+                return Var(tokens[pos - 1][1])
+            raise SyntaxError(f"Unexpected token {tokens[pos]} at {pos}")
+        def parse_pattern():
+            if match("SYMBOL", "_"):
+                return WildcardPattern()
+            if match("NUMBER"):
+                return LiteralPattern(int(tokens[pos - 1][1]))
+            if match("STRING"):
+                return LiteralPattern(tokens[pos - 1][1][1:-1])
+            if match("IDENT"):
+                return VarPattern(tokens[pos - 1][1])
+            if match("SYMBOL", "("):
+                elts = []
+                while not match("SYMBOL", ")"):
+                    sub = parse_pattern()
+                    default, lazy = None, False
+                    if match("SYMBOL", "="):
+                        default = parse_expr()
+                    if match("SYMBOL", "lazy"):
+                        lazy = True
+                    elts.append((sub, default, lazy))
+                    match("SYMBOL", ",")
+                return TuplePattern(elts)
+            if match("SYMBOL", "["):
+                elts = []
+                while not match("SYMBOL", "]"):
+                    if match("SYMBOL", "*"):
+                        var = expect("IDENT")[1]
+                        beanstalk = False
+                        if match("SYMBOL", "*"):
+                            beanstalk = True
+                        elts.append((SplatPattern(var, beanstalk), None, False))
+                    else:
+                        sub = parse_pattern()
+                        default, lazy = None, False
+                        if match("SYMBOL", "="):
+                            default = parse_expr()
+                        if match("SYMBOL", "lazy"):
+                            lazy = True
+                        elts.append((sub, default, lazy))
+                    match("SYMBOL", ",")
+                return ListPattern(elts)
+            if match("SYMBOL", "{"):
+                entries = []
+                while not match("SYMBOL", "}"):
+                    key = expect("STRING")[1][1:-1]
+                    sub = parse_pattern()
+                    default, lazy = None, False
+                    if match("SYMBOL", "="):
+                        default = parse_expr()
+                    if match("SYMBOL", "lazy"):
+                        lazy = True
+                    entries.append((key, sub, default, lazy))
+                    match("SYMBOL", ",")
+                return DictPattern(entries)
+            raise SyntaxError(f"Unexpected token {tokens[pos]} at {pos}")
+        def parse_stmt():
+            if match("IDENT", "var"):
+                name = expect("IDENT")[1]
+                expect("SYMBOL", "=")
+                expr = parse_expr()
+                return VarDecl(name, expr)
+            if match("IDENT", "say"):
+                expr = parse_expr()
+                return Say(expr)
+            if match("IDENT", "chart"):
+                expr = parse_expr()
+                tree = False
+                if match("IDENT", "tree"):
+                    tree = True
+                return Chart(expr, tree)
+            if match("IDENT", "match"):
+                expr = parse_expr()
+                expect("SYMBOL", "{")
+                cases = []
+                while not match("SYMBOL", "}"):
+                    pattern = parse_pattern()
+                    expect("SYMBOL", ":")
+                    block = []
+                    while not (match("SYMBOL", "case") or tokens[pos][0] == "SYMBOL" and tokens[pos][1] == "}"):
+                        block.append(parse_stmt())
+                    cases.append(Case(pattern, block))
+                return Match(expr, cases)
+            raise SyntaxError(f"Unexpected token {tokens[pos]} at {pos}")
+        def parse_task():
+            expect("IDENT", "task")
+            name = expect("IDENT")[1]
+            expect("SYMBOL", "{")
+            body = []
+            while not match("SYMBOL", "}"):
+                body.append(parse_stmt())
+            return Task(name, body)
+        ast = []
+        while pos < len(tokens):
+            ast.append(parse_task())
+            return ast
+        return ast
+    # -----------------------------
+    # Pattern Matching (Runtime)
+    def match_pattern(pattern, value, env):
+        """
+    Match a pattern against a value, updating env on success.
+    # Literal pattern
+    """
+    if isinstance(pattern, LiteralPattern):
+        return value == pattern.value
+    # Wildcard pattern
+    elif isinstance(pattern, WildcardPattern):
+        return True
+    # Variable pattern
+    elif isinstance(pattern, VarPattern):
+        env[pattern.name] = value
+        return True
+    # Tuple pattern
+    elif isinstance(pattern, TuplePattern):
+        if not isinstance(value, tuple):
+            return False
+        vals = list(value)
+        vi = 0
+        for sub, default, lazy in pattern.elts:
+            if vi < len(vals):
+                if not match_pattern(sub, vals[vi], env):
+                    return False
+                vi += 1
+            else:
+                if default is not None:
+                    env[sub.name] = default.value if isinstance(default, Push) else None
+                else:
+                    return False
+        return True
+    # List pattern
+    elif isinstance(pattern, ListPattern):
+        if not isinstance(value, list):
+            return False
+        vals = list(value)
+        vi = 0
+        for sub, default, lazy in pattern.elts:
+            if isinstance(sub, SplatPattern):
+                env[sub.var] = vals[vi:] if sub.beanstalk else vals[vi:]
+                return True
+            if vi < len(vals):
+                if not match_pattern(sub, vals[vi], env):
+                    return False
+                vi += 1
+            else:
+                if default is not None:
+                    env[sub.name] = default.value if isinstance(default, Push) else None
+                else:
+                    return False
+        return True
+    # Dict pattern
+    elif isinstance(pattern, DictPattern):
+        if not isinstance(value, dict):
+            return False
+        for key, sub, default, lazy in pattern.entries:
+            if key in value:
+                if not match_pattern(sub, value[key], env):
+                    return False
+            else:
+                if default is not None:
+                    env[sub.name] = default.value if isinstance(default, Push) else None
+                else:
+                    return False
+        return True
+    # Splat pattern
+    elif isinstance(pattern, SplatPattern):
+        env[pattern.var] = value
+        return True
+    else:
+        raise RuntimeError(f"Unsupported pattern {pattern}")
+    # -----------------------------
+    def run_match(self, expr_node, cases):
+        """
+        Execute a match statement in VM context.
+        """
+        value = expr_node.eval(self.env)
+        for case in cases:
+            local_env = dict(self.env)
+            if case.pattern.match(value, local_env):
+                for stmt in case.block:
+                    stmt.eval(local_env)
+                self.env.update(local_env)
+                return True
+        return False
+
+    def compile_stmt(stmt, builder, env):
+        if isinstance(stmt, VarDecl):
+            val = compile_expr(stmt.expr, builder, env)
+        env[stmt.name] = val
+
+        
+        for case in stmt.cases:
+            case_block = builder.append_basic_block("case_body")
+            next_block = builder.append_basic_block("next_case")
+
+            cond, new_env = compile_pattern(case.pattern, value, builder, dict(env))
+            builder.cbranch(cond, case_block, next_block)
+
+            # Case body
+            builder.position_at_start(case_block)
+            for s in case.block:
+                compile_stmt(s, builder, new_env)
+            builder.branch(end_block)
+
+            # Next case
+            builder.position_at_start(next_block)
+
+        builder.branch(end_block)
+        builder.position_at_start(end_block)
+
+def compile_task(task):
+    func_ty = ir.FunctionType(int_type, [])
+    func = ir.Function(llvm_module, func_ty, name=task.name)
+    block = func.append_basic_block("entry")
+    builder = ir.IRBuilder(block)
+    env = {}
+    for stmt in task.body:
+        compile_stmt(stmt, builder, env)
+    builder.ret(ir.Constant(int_type, 0))
+
+def compile_program(ast):
+    for node in ast:
+        if isinstance(node, Task):
+            compile_task(node)
+
+    llvm_ir = str(llvm_module)
+    mod = binding.parse_assembly(llvm_ir)
+    mod.verify()
+
+    obj = target_machine.emit_object(mod)
+    with open("stacker.out.o", "wb") as f:
+        f.write(obj)
+    print("✅ Compiled object: stacker.out.o")
+
+    return llvm_ir
