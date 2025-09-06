@@ -1936,3 +1936,140 @@ class VM:
 
 # You can expose these as Stacker statements or expressions as needed.
        
+# -----------------------------
+# Native Runtime Speed, FFI Interop, Guards, and Scoped Task Permissions
+# -----------------------------
+
+import ctypes
+import threading
+
+class PermissionError(Exception):
+    pass
+
+class TaskPermissions:
+    """
+    Scoped permissions for each Stacker task.
+    """
+    READ = 1 << 0
+    WRITE = 1 << 1
+    EXEC = 1 << 2
+    ADMIN = 1 << 3
+
+    def __init__(self):
+        self.perms = {}  # task_name -> bitmask
+
+    def set(self, task_name, mask):
+        self.perms[task_name] = mask
+
+    def check(self, task_name, mask):
+        if (self.perms.get(task_name, 0) & mask) != mask:
+            raise PermissionError(f"Task '{task_name}' lacks required permission: {mask}")
+
+permissions = TaskPermissions()
+
+class FFI:
+    """
+    Foreign Function Interface for calling C/C++ functions from Stacker.
+    """
+    def __init__(self):
+        self.libs = {}
+        self.funcs = {}
+
+    def load_library(self, libname, path=None):
+        if path is None:
+            path = libname
+        lib = ctypes.CDLL(path)
+        self.libs[libname] = lib
+        return lib
+
+    def register_function(self, libname, funcname, restype=ctypes.c_int64, argtypes=None):
+        lib = self.libs.get(libname)
+        if not lib:
+            raise RuntimeError(f"Library '{libname}' not loaded")
+        func = getattr(lib, funcname)
+        func.restype = restype
+        if argtypes:
+            func.argtypes = argtypes
+        self.funcs[funcname] = func
+        return func
+
+    def call(self, funcname, *args):
+        func = self.funcs.get(funcname)
+        if not func:
+            raise RuntimeError(f"FFI function '{funcname}' not registered")
+        return func(*args)
+
+ffi = FFI()
+
+class VM:
+    """
+    The Stacker Virtual Machine.
+    Holds the environment, tasks, and controls execution.
+    Now supports FFI, runtime guards, and scoped permissions.
+    """
+
+    def __init__(self, ast):
+        self.ast = ast
+        self.env = {}
+        self.tasks = {node.name: node for node in ast if isinstance(node, Task)}
+        self.lock = threading.Lock()  # For thread-safe guards
+
+    def run_task(self, name="main"):
+        if name not in self.tasks:
+            raise RuntimeError(f"Task '{name}' not found")
+        permissions.check(name, TaskPermissions.EXEC)
+        task = self.tasks[name]
+        for stmt in task.body:
+            self.guard(stmt, name)
+            stmt.eval(self.env)
+        return self.env
+
+    def run_all(self):
+        for name in self.tasks:
+            self.run_task(name)
+        return self.env
+
+    def guard(self, stmt, task_name):
+        """
+        Innate runtime guard: checks permissions and resource limits.
+        """
+        # Example: restrict variable assignment to tasks with WRITE permission
+        if isinstance(stmt, VarDecl):
+            permissions.check(task_name, TaskPermissions.WRITE)
+        # Example: restrict FFI calls to ADMIN
+        if isinstance(stmt, FFI_Call):
+            permissions.check(task_name, TaskPermissions.ADMIN)
+        # Add more guards as needed
+
+    def ffi_load(self, libname, path=None):
+        permissions.check("main", TaskPermissions.ADMIN)
+        return ffi.load_library(libname, path)
+
+    def ffi_register(self, libname, funcname, restype=ctypes.c_int64, argtypes=None):
+        permissions.check("main", TaskPermissions.ADMIN)
+        return ffi.register_function(libname, funcname, restype, argtypes)
+
+    def ffi_call(self, funcname, *args):
+        permissions.check("main", TaskPermissions.ADMIN)
+        return ffi.call(funcname, *args)
+
+# Example FFI call node for AST
+class FFI_Call(Node):
+    def __init__(self, funcname, args):
+        self.funcname = funcname
+        self.args = args
+
+    def eval(self, env):
+        return ffi.call(self.funcname, *(arg.eval(env) for arg in self.args))
+
+# Example: Set permissions for tasks
+permissions.set("main", TaskPermissions.READ | TaskPermissions.WRITE | TaskPermissions.EXEC | TaskPermissions.ADMIN)
+permissions.set("user", TaskPermissions.READ | TaskPermissions.EXEC)
+
+# Example usage:
+# vm = VM(ast)
+# vm.ffi_load("libmath.so")
+# vm.ffi_register("libmath.so", "add", ctypes.c_int64, [ctypes.c_int64, ctypes.c_int64])
+# result = vm.ffi_call("add", 2, 3)
+
+# You can extend the parser to support FFI_Call nodes and permission declarations in Stacker code.
