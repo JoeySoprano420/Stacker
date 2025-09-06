@@ -173,6 +173,48 @@ class Chart(Node):
                 print(val)
         return val
 
+    # === Statements ===
+class VarDecl:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+    def eval(self, env):
+        env[self.name] = self.value
+        return env[self.name]
+
+def validate_ast_node(node):
+    if isinstance(node, VarDecl) and not hasattr(node, 'name'):
+        raise Exception("🧪 VarDecl missing name binding")
+
+    if isinstance(node, VarDecl) and not hasattr(node, 'value'):
+        raise Exception("🧪 VarDecl missing value")
+
+# === Statements ===
+class VarDecl:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+    def eval(self, env):
+        env[self.name] = self.value
+        return env[self.name]
+
+def validate_ast_node(node):
+    if isinstance(node, VarDecl) and not hasattr(node, 'name'):
+        raise Exception("🧪 VarDecl missing name binding")
+
+    if isinstance(node, VarDecl) and not hasattr(node, 'value'):
+        raise Exception("🧪 VarDecl missing value")
+    if isinstance(node, VarDecl):
+        if not isinstance(node.name, str):
+            raise Exception("🧪 VarDecl name must be a string")
+        if not isinstance(node.value, (int, str, list, dict)):
+            raise Exception("🧪 VarDecl value must be int, str, list, or dict")
+        if isinstance(node, Say) and not hasattr(node, 'expr'):
+            raise Exception("🧪 Say missing expr")
+        if isinstance(node, Say) and not isinstance(node.expr, (Push, Var)):
+            raise Exception("🧪 Say expr must be Push or Var")
 
 # === Expressions ===
 class Push(Node):
@@ -196,6 +238,278 @@ class Var(Node):
             env[self.name] = v
         return v
 
+    def print_tree(value, indent=0):
+        """Recursively print a value as a tree."""
+        prefix = " " * indent
+        if isinstance(value, list):
+            print(f"{prefix}- List[{len(value)}]")
+            for item in value:
+                print_tree(item, indent + 2)
+        elif isinstance(value, dict):
+            print(f"{prefix}- Dict{{{len(value)}}}")
+            for k, v in value.items():
+                print(f"{prefix}  {k}:")
+                print_tree(v, indent + 4)
+        else:
+            print(f"{prefix}- {value}")
+
+# ===== AST nodes =====
+
+class Program:
+    def __init__(self, tasks):
+        self.tasks = tasks  # list[TaskDef]
+
+class TaskDef:
+    def __init__(self, name, body):
+        self.name = name      # str
+        self.body = body      # list[Stmt]
+
+# Statements
+class VarDecl:
+    def __init__(self, name, expr):
+        self.name = name      # str
+        self.expr = expr      # Expr
+
+class Assign:
+    def __init__(self, name, expr):
+        self.name = name
+        self.expr = expr
+
+class SayStmt:
+    def __init__(self, expr):
+        self.expr = expr
+
+class ExprStmt:
+    def __init__(self, expr):
+        self.expr = expr
+
+# Expressions (minimal scaffold; expand as your language grows)
+class Number:
+    def __init__(self, value):
+        self.value = int(value)
+
+class String:
+    def __init__(self, value):
+        # value comes in like: "hello"
+        self.value = value[1:-1]
+
+class Var:
+    def __init__(self, name):
+        self.name = name
+
+class BinOp:
+    def __init__(self, left, op, right):
+        self.left = left      # Expr
+        self.op = op          # str, e.g. '+', '-', '=='
+        self.right = right    # Expr
+
+
+# ===== Parser =====
+
+class ParserError(SyntaxError):
+    pass
+
+class Parser:
+    def __init__(self, tokens):
+        # tokens: list[(type, value)]
+        self.tokens = tokens
+        self.i = 0
+        self.n = len(tokens)
+
+    # --- basic cursor utilities ---
+
+    def eof(self):
+        return self.i >= self.n
+
+    def peek(self, k=0):
+        j = self.i + k
+        return self.tokens[j] if j < self.n else (None, None)
+
+    def advance(self):
+        t = self.peek()
+        self.i += 1
+        return t
+
+    def match(self, ttype=None, value=None):
+        t = self.peek()
+        if ttype is not None and t[0] != ttype:
+            return False
+        if value is not None and t[1] != value:
+            return False
+        self.advance()
+        return True
+
+    def expect(self, ttype=None, value=None, ctx=""):
+        t = self.peek()
+        if ttype is not None and t[0] != ttype:
+            raise ParserError(f"Expected {ttype} {value or ''} but got {t} {ctx}".strip())
+        if value is not None and t[1] != value:
+            raise ParserError(f"Expected {ttype} {value} but got {t} {ctx}")
+        return self.advance()
+
+    # --- high-level entrypoint ---
+
+    def parse(self):
+        """
+        program := task_def*
+        task_def := 'task' IDENT ':' block 'end'
+        """
+        tasks = []
+        while not self.eof():
+            # allow stray separators (if your lexer included NEWLINEs or SKIP, they were dropped;
+            # so we rely only on keywords)
+            ttype, tval = self.peek()
+            if ttype == "IDENT" and tval == "task":
+                tasks.append(self.parse_task_def())
+            else:
+                # If your grammar forbids top-level statements, this is an error.
+                # Otherwise you could parse loose statements or ignore them.
+                raise ParserError(f"Unexpected token at top level: {self.peek()}")
+        return Program(tasks)
+
+    def parse_task_def(self):
+        # 'task' IDENT ':' block 'end'
+        self.expect("IDENT", "task", ctx="while parsing task")
+        _, name = self.expect("IDENT", ctx="task name")
+        self.expect("SYMBOL", ":", ctx="after task name")
+        body = self.parse_block()
+        # 'end' terminator for the block
+        self.expect("IDENT", "end", ctx="to close task")
+        return TaskDef(name, body)
+
+    # --- blocks and statements ---
+
+    def parse_block(self):
+        """
+        block := stmt*   (terminated by 'end' at caller level)
+        We do NOT consume 'end' here; caller will.
+        We stop when the next token is IDENT 'end' or EOF.
+        """
+        stmts = []
+        while not self.eof():
+            ttype, tval = self.peek()
+
+            # Stop if caller's terminator is ahead
+            if ttype == "IDENT" and tval == "end":
+                break
+
+            stmts.append(self.parse_stmt())
+
+        return stmts
+
+    def parse_stmt(self):
+        """
+        stmt := var_decl
+              | say_stmt
+              | assign
+              | expr_stmt
+
+        var_decl := 'let' IDENT '=' expr
+        say_stmt := 'say' expr
+        assign   := IDENT '=' expr
+        expr_stmt:= expr
+        """
+        ttype, tval = self.peek()
+
+        # var_decl
+        if ttype == "IDENT" and tval == "let":
+            self.advance()  # consume 'let'
+            _, name = self.expect("IDENT", ctx="in let")
+            self.expect("SYMBOL", "=", ctx="in let")
+            expr = self.parse_expr()
+            return VarDecl(name, expr)
+
+        # say_stmt
+        if ttype == "IDENT" and tval == "say":
+            self.advance()  # consume 'say'
+            expr = self.parse_expr()
+            return SayStmt(expr)
+
+        # assignment vs expr_stmt:
+        # lookahead: IDENT '=' => assign
+        if ttype == "IDENT":
+            # lookahead for '='
+            t2type, t2val = self.peek(1)
+            if t2type == "SYMBOL" and t2val == "=":
+                _, name = self.advance()  # IDENT
+                self.advance()            # '='
+                expr = self.parse_expr()
+                return Assign(name, expr)
+
+        # fallback: expression statement
+        expr = self.parse_expr()
+        return ExprStmt(expr)
+
+    # --- expressions (precedence climbing) ---
+
+    def parse_expr(self):
+        # Simple precedence: equality > additive > multiplicative > primary
+        return self.parse_equality()
+
+    def parse_equality(self):
+        node = self.parse_add()
+        while True:
+            ttype, tval = self.peek()
+            if ttype == "OP" and tval == "==":
+                op = tval
+                self.advance()
+                rhs = self.parse_add()
+                node = BinOp(node, op, rhs)
+            else:
+                break
+        return node
+
+    def parse_add(self):
+        node = self.parse_mul()
+        while True:
+            ttype, tval = self.peek()
+            if ttype == "OP" and tval in ("+", "-"):
+                op = tval
+                self.advance()
+                rhs = self.parse_mul()
+                node = BinOp(node, op, rhs)
+            else:
+                break
+        return node
+
+    def parse_mul(self):
+        node = self.parse_primary()
+        while True:
+            ttype, tval = self.peek()
+            if ttype == "OP" and tval in ("*", "/"):
+                op = tval
+                self.advance()
+                rhs = self.parse_primary()
+                node = BinOp(node, op, rhs)
+            else:
+                break
+        return node
+
+    def parse_primary(self):
+        ttype, tval = self.peek()
+
+        if ttype == "NUMBER":
+            self.advance()
+            return Number(tval)
+
+        if ttype == "STRING":
+            self.advance()
+            return String(tval)
+
+        if ttype == "IDENT":
+            # reserved words handled as statements above; here treat remaining as variable references
+            if tval in ("task", "end", "let", "say"):
+                raise ParserError(f"Unexpected keyword in expression: {tval}")
+            self.advance()
+            return Var(tval)
+
+        if ttype == "SYMBOL" and tval == "(":
+            self.advance()
+            expr = self.parse_expr()
+            self.expect("SYMBOL", ")", ctx="to close '('")
+            return expr
+
+        raise ParserError(f"Unexpected token in expression: {self.peek()}")
 
 # -----------------------------
 # Pattern AST (Executable)
@@ -2216,3 +2530,4 @@ def print_tree(value, indent=0):
             print_tree(v, indent + 2)
     else:
         print(" " * indent + str(value))
+
