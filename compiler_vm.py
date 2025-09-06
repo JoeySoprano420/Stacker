@@ -1866,3 +1866,73 @@ def compile_and_run(filename):
     # Run the result
     subprocess.run(["./stacker.out"])
 
+    # -----------------------------
+# Foreign Function Interface (FFI) for C/C++ interop
+# -----------------------------
+
+import ctypes
+
+class FFI:
+    """
+    Foreign Function Interface for calling C/C++ functions from Stacker.
+    """
+    def __init__(self):
+        self.libs = {}
+        self.funcs = {}
+
+    def load_library(self, libname, path=None):
+        """
+        Load a shared library (.so/.dll/.dylib).
+        """
+        if path is None:
+            path = libname
+        lib = ctypes.CDLL(path)
+        self.libs[libname] = lib
+        return lib
+
+    def register_function(self, libname, funcname, restype=ctypes.c_int64, argtypes=None):
+        """
+        Register a function from a loaded library.
+        """
+        lib = self.libs.get(libname)
+        if not lib:
+            raise RuntimeError(f"Library '{libname}' not loaded")
+        func = getattr(lib, funcname)
+        func.restype = restype
+        if argtypes:
+            func.argtypes = argtypes
+        self.funcs[funcname] = func
+        return func
+
+    def call(self, funcname, *args):
+        """
+        Call a registered C/C++ function.
+        """
+        func = self.funcs.get(funcname)
+        if not func:
+            raise RuntimeError(f"FFI function '{funcname}' not registered")
+        return func(*args)
+
+# Global FFI instance
+ffi = FFI()
+
+# Example usage in Stacker VM:
+class VM:
+    # ... existing methods ...
+
+    def ffi_load(self, libname, path=None):
+        return ffi.load_library(libname, path)
+
+    def ffi_register(self, libname, funcname, restype=ctypes.c_int64, argtypes=None):
+        return ffi.register_function(libname, funcname, restype, argtypes)
+
+    def ffi_call(self, funcname, *args):
+        return ffi.call(funcname, *args)
+
+# Example Stacker code usage:
+# vm.ffi_load("libmath.so")
+# vm.ffi_register("libmath.so", "add", ctypes.c_int64, [ctypes.c_int64, ctypes.c_int64])
+# result = vm.ffi_call("add", 2, 3)
+
+# You can expose these as Stacker statements or expressions as needed.
+       
