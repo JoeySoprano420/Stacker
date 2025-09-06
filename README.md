@@ -570,3 +570,26 @@ Secure and sandboxed
 Invocation: Typically compiled via toolchains like Emscripten or Rust’s wasm-pack
 
 Each of these plays a distinct role in the ceremony of compilation—from invoking native spirits of the machine (NASM, GAS, MASM) to summoning portable avatars for the web (WASM). If you’re designing a symbolic overlay for Stacker’s compiler dispatch, these could be your elemental glyphs.
+
+🧰 What Are These?
+They’re different tools that help turn your Stacker code into something your computer can actually run. Think of them like translators—each one speaks a different “machine language” depending on where you want your code to live.
+
+🔧 How Stacker Uses Them
+The Stacker compiler is smart. It looks at the file type you give it and picks the right translator automatically:
+
+File Type	What It Means	Where It Runs	What Stacker Does
+.nasm	NASM (Netwide Assembler)	Linux or Windows	Uses NASM to turn your code into fast, low-level machine instructions
+.asm	GAS (GNU Assembler)	Unix systems	Uses GAS to compile your code, or falls back to NASM if needed
+.masm	MASM (Microsoft Assembler)	Windows	Uses MASM to build Windows programs, even through Wine if you're on Mac/Linux
+.wasm	WASM (WebAssembly)	Web browsers or sandboxed apps	Runs your code in a secure, portable way—great for web-based tools
+🧠 Why It Matters
+You don’t have to manually choose a compiler—Stacker does it for you.
+
+You can write one ceremonial task in Stacker and run it on different platforms.
+
+It’s part of what makes Stacker feel like a living system: it adapts to the environment and chooses the right ritual to perform.
+
+So in plain terms: Stacker looks at your file, figures out what kind of machine it’s meant for, and uses the right tool to make it run. Like a universal adapter for code.
+
+## _____
+
