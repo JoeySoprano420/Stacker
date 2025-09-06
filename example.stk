@@ -1,0 +1,4 @@
+task main:
+  let msg = "Hello, Stacker!"
+  say msg
+end
