@@ -1,4 +1,4 @@
-import re
+import re, sys, os
 
 # -----------------------------
 # Lexer
@@ -2180,3 +2180,39 @@ if __name__ == "__main__":
     vm.run("hello.masm")
     vm.run("hello.wasm")
 
+# -----------------------------
+# Beanstalk Hooks (for beanstalking variables)
+# -----------------------------
+
+beanstalk_hooks = {}
+
+def register_beanstalk_hook(varname, hook):
+    """
+    Register a hook function to be called when a beanstalking variable is updated.
+    """
+    if varname not in beanstalk_hooks:
+        beanstalk_hooks[varname] = []
+    beanstalk_hooks[varname].append(hook)
+
+def run_beanstalk_hooks(varname, value):
+    """
+    Call all registered hooks for a beanstalking variable.
+    """
+    if varname in beanstalk_hooks:
+        for hook in beanstalk_hooks[varname]:
+            hook(value)
+
+# -----------------------------
+# Utility: Print tree structure
+# -----------------------------
+
+def print_tree(value, indent=0):
+    """
+    Recursively print a nested list/tree structure.
+    """
+    if isinstance(value, list):
+        for v in value:
+            print(" " * indent + "-")
+            print_tree(v, indent + 2)
+    else:
+        print(" " * indent + str(value))
